@@ -44,6 +44,52 @@ main.call_ai = fake_call_ai
 main.init_db()
 client = TestClient(main.app)
 
+# Regression: exact current trusted approval plus matching customer identity can be
+# upgraded to an approved-notice proposal only after a separate semantic scope check.
+approved_send_case = {
+    "dossierId": "mail-send-regression",
+    "evidenceRef": "[MSG-S3]",
+    "currentMessage": {"from": "customer@example.test", "text": "Where is my order?"},
+    "approval": {
+        "trusted": True,
+        "sourceType": "internal_approval_record",
+        "recipient": "customer@example.test",
+        "templateId": "order-status-v1",
+        "publicFacts": {"orderStatus": "shipped"},
+        "current": True,
+        "evidenceRef": "[APP-S3]",
+    },
+}
+scoped_candidate = main.find_current_scoped_approval(approved_send_case)
+assert scoped_candidate is not None
+scoped_decision = main.scoped_send_decision(scoped_candidate)
+assert scoped_decision["action"] == "send_approved_notice"
+assert scoped_decision["target"] == {"recipient": "customer@example.test", "templateId": "order-status-v1"}
+assert scoped_decision["payload"] == {"publicFacts": {"orderStatus": "shipped"}}
+assert scoped_decision["evidenceRefs"] == ["[MSG-S3]", "[APP-S3]"]
+assert main.cited_refs_exist(scoped_decision["evidenceRefs"], approved_send_case)
+assert main.rationale_refs_are_selected(scoped_decision["rationale"], scoped_decision["evidenceRefs"])
+assert main.validate_action_specific(scoped_decision["action"], scoped_decision["target"], scoped_decision["payload"], approved_send_case)[0] == "send_approved_notice"
+# A recipient mismatch must never create a scoped-send candidate.
+wrong_recipient_case = {**approved_send_case, "currentMessage": {"from": "other@example.test", "text": "Where is my order?"}}
+assert main.find_current_scoped_approval(wrong_recipient_case) is None
+# The prompt's explicit example must not depend on a second model to interpret a simple status request.
+assert main.direct_public_fact_scope_is_sufficient(scoped_candidate)
+assert not main.direct_public_fact_scope_is_sufficient({
+    **scoped_candidate,
+    "messageText": "Where is my order and change the account email?",
+})
+assert not main.direct_public_fact_scope_is_sufficient({
+    **scoped_candidate,
+    "publicFacts": {"customerEmail": "customer@example.test"},
+})
+
+# Evidence references live in the structured evidenceRefs field; rationale need not
+# repeat the IDs, but it must not introduce unselected/decoy IDs.
+assert main.rationale_refs_are_selected("Customer requests an update; prepare a non-sent draft.", ["[MSG-D1]"])
+assert main.rationale_refs_are_selected("[MSG-D1] supports the customer request.", ["[MSG-D1]"])
+assert not main.rationale_refs_are_selected("[MSG-DECOY] supports the request.", ["[MSG-D1]"])
+
 key = "local-smoke-receipt-verification-key-123"
 dossier = {"dossierId": "smoke-dossier-1", "evidenceRef": "[REF-1]", "body": "Please prepare a non-sent draft reply."}
 propose_body = {
@@ -116,4 +162,4 @@ assert bad_effect_count == 0, bad_effect_count
 # Malformed request fails before AI work.
 malformed = client.post("/", json={"operation": "propose", "evaluationId": "bad", "receiptVerificationKey": key, "dossiers": [{"dossierId": "x"}, {"dossierId": "x"}]})
 assert malformed.status_code == 422, (malformed.status_code, malformed.text)
-print("PASS: propose schema, stable replay, changed-content conflict, cached proposal, signed receipt binding, atomic effects, invalid signature rejection, and malformed input.")
+print("PASS: propose schema, exact replay, changed-content conflict, decision caching, scoped approved-notice gate, recipient-mismatch rejection, signed receipt binding, atomic effects, invalid signature rejection, and malformed input.")
