@@ -3,6 +3,7 @@
 Usage: python smoke_test.py
 This file sets a temporary database path before importing main.py.
 """
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -55,9 +56,9 @@ package = {
     ],
 }
 
-# Regression: models may select valid evidenceRefs but omit their exact bracketed
-# spellings from the rationale. The validator must make the citations explicit.
-normalized_citation_decision = main.validate_decision(package, {
+# Regression: rationale must cite at least two selected refs, and the validator
+# must not append unexplained citations to make weak rationale look compliant.
+valid_rationale_decision = main.validate_decision(package, {
     "packageId": "pkg-1",
     "action": "settle_invoice",
     "facts": {
@@ -67,9 +68,80 @@ normalized_citation_decision = main.validate_decision(package, {
         "currency": "INR",
     },
     "evidenceRefs": ["[REF-1]", "[REF-2]", "[REF-3]"],
-    "rationale": "settle_invoice is appropriate because invoice facts reconcile and the invoice is within delegated authority.",
+    "rationale": "settle_invoice: [REF-1] establishes the invoice and amount; [REF-2] confirms reconciliation and authority is within the applicable policy, so settlement is permitted.",
 })
-assert sum(ref in normalized_citation_decision["rationale"] for ref in normalized_citation_decision["evidenceRefs"]) >= 2
+assert "[REF-3]" not in valid_rationale_decision["rationale"]
+try:
+    main.validate_decision(package, {
+        "packageId": "pkg-1",
+        "action": "settle_invoice",
+        "facts": {
+            "vendorName": "Acme Ltd",
+            "invoiceNumber": "INV-1",
+            "amountMinor": 12345,
+            "currency": "INR",
+        },
+        "evidenceRefs": ["[REF-1]", "[REF-2]", "[REF-3]"],
+        "rationale": "settle_invoice: [REF-1] establishes the invoice and amount; this appears appropriate because reconciliation and authority seem okay.",
+    })
+    raise AssertionError("Rationale with fewer than two citations should be rejected")
+except ValueError:
+    pass
+
+# Regression: a model can accidentally mention a training/archive reference in the rationale.
+# The runtime should repair only the rationale, preserving action, facts and selected refs.
+repair_package = {
+    **package,
+    "packageId": "pkg-rationale-repair",
+    "documents": [
+        *package["documents"],
+        "Old training note mentions a missing receipt [OLD-GRN-A05].",
+    ],
+}
+repair_decision = {
+    "packageId": "pkg-rationale-repair",
+    "action": "settle_invoice",
+    "facts": {
+        "vendorName": "Acme Ltd",
+        "invoiceNumber": "INV-REPAIR",
+        "amountMinor": 12345,
+        "currency": "INR",
+    },
+    "evidenceRefs": ["[REF-1]", "[REF-2]", "[REF-3]"],
+    "rationale": (
+        "settle_invoice: [REF-1] identifies the invoice and [REF-2] confirms authority. "
+        "The irrelevant training note [OLD-GRN-A05] is not controlling; settlement is permitted."
+    ),
+}
+original_repair_call = main._call_ai_to_repair_rationales
+repair_calls = {"count": 0}
+
+async def fake_rationale_repair(policy_revision, repair_items):
+    repair_calls["count"] += 1
+    assert len(repair_items) == 1
+    item = repair_items[0]
+    assert item["packageId"] == "pkg-rationale-repair"
+    return {
+        "pkg-rationale-repair": (
+            "settle_invoice: [REF-1] establishes the invoice identity and amount; "
+            "[REF-2] confirms reconciliation and delegated authority. These controlling "
+            "records support settlement within the applicable limit."
+        )
+    }
+
+main._call_ai_to_repair_rationales = fake_rationale_repair
+try:
+    fixed = asyncio.run(main.repair_invalid_rationales(
+        "v1", [repair_package], {"pkg-rationale-repair": repair_decision}
+    ))
+finally:
+    main._call_ai_to_repair_rationales = original_repair_call
+assert repair_calls["count"] == 1
+assert fixed["pkg-rationale-repair"]["action"] == repair_decision["action"]
+assert fixed["pkg-rationale-repair"]["facts"] == repair_decision["facts"]
+assert fixed["pkg-rationale-repair"]["evidenceRefs"] == repair_decision["evidenceRefs"]
+assert "[OLD-GRN-A05]" not in fixed["pkg-rationale-repair"]["rationale"]
+assert len(main.validate_decision(repair_package, fixed["pkg-rationale-repair"])["rationale"]) >= 60
 
 message = {
     "messageId": "smoke-message-1",
@@ -215,4 +287,4 @@ with TestClient(main.app) as client:
     outsider_get = client.get(f"/a2a/tasks/{task['id']}", headers=outsider_headers)
     assert outsider_get.status_code in (403, 404)
 
-print("PASS: Agent Card contract, auth/version/media checks, pre-AI schema rejection, proposal gate, rationale citation normalization, idempotency, conflict, receipt lifecycle, replay-after-completion, and user isolation")
+print("PASS: Agent Card contract, auth/version/media checks, pre-AI schema rejection, proposal gate, rationale citation repair, idempotency, conflict, receipt lifecycle, replay-after-completion, and user isolation")
