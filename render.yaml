@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: ga3-q2-invoice-agent
+    runtime: docker
+    rootDir: ga3_invoice_agent
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: DB_PATH
+        value: /data/state.sqlite3
+      - key: OPENAI_BASE_URL
+        value: https://aipipe.org/openai/v1
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-6-luna
+      - key: AI_TIMEOUT_SECONDS
+        value: "36"
+
+  - type: web
+    name: ga3-q3-mailroom-agent
+    runtime: docker
+    rootDir: ga3_mailroom_agent
+    plan: free
+    envVars:
+      - key: DB_PATH
+        value: /data/mailroom.sqlite3
+      - key: OPENAI_BASE_URL
+        value: https://aipipe.org/openai/v1
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-6-luna
+      - key: AI_TIMEOUT_SECONDS
+        value: "46"
+      - key: AI_MAX_COMPLETION_TOKENS
+        value: "18000"
+      - key: AI_REASONING_EFFORT
+        value: low
